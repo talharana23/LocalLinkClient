@@ -162,7 +162,10 @@ function IncomingCallOverlay({ number, onDecline, onAnswer }) {
 
 // ─── Screen Components ────────────────────────────────────────────────────────
 
-function StatusScreen({ signal, uptime, activityLog }) {
+function StatusScreen({ signal, uptime, activityLog, onConnect, onDisconnect }) {
+  const isConnected = signal === 'Connected';
+  const isConnecting = signal === 'Connecting...';
+
   return (
     <ScrollView contentContainerStyle={styles.scrollBody} showsVerticalScrollIndicator={false}>
       <BlurView intensity={28} tint="dark" style={styles.statusCard}>
@@ -176,10 +179,17 @@ function StatusScreen({ signal, uptime, activityLog }) {
           </View>
         </View>
         <View style={styles.statusTextBlock}>
-          <Text style={styles.statusPrimary}>{signal === 'Connected' ? 'Listening Online' : 'Listening Offline'}</Text>
+          <Text style={styles.statusPrimary}>{isConnected ? 'Listening Online' : isConnecting ? 'Connecting...' : 'Offline'}</Text>
           <Text style={styles.statusSecondary}>
             on Port <Text style={styles.monoGreen}>8080</Text>
           </Text>
+          <TouchableOpacity 
+            style={[styles.connectButton, isConnected ? styles.disconnectButton : null, isConnecting && {opacity: 0.5}]} 
+            onPress={isConnected ? onDisconnect : onConnect}
+            disabled={isConnecting}
+          >
+            <Text style={styles.connectButtonText}>{isConnected ? 'Disconnect' : isConnecting ? 'Connecting...' : 'Connect to Host'}</Text>
+          </TouchableOpacity>
         </View>
       </BlurView>
 
@@ -384,7 +394,7 @@ function SettingsScreen() {
 export default function App() {
   const [callStatus, setCallStatus]   = useState('IDLE'); // 'IDLE' | 'RINGING'
   const [callerNumber, setCallerNumber] = useState('');
-  const [signal, setSignal]            = useState('Connecting...');
+  const [signal, setSignal]            = useState('Offline');
   const [uptime]                       = useState('Online');
   const [activityLog, setActivityLog]  = useState([]);
   const [hostIP, setHostIP]            = useState('192.168.100.114');
@@ -423,6 +433,24 @@ export default function App() {
   function appendLog(entry) {
     setActivityLog(prev => [{ id: Date.now(), ...entry }, ...prev].slice(0, 50));
   }
+
+  const handleConnect = () => {
+    setSignal('Connecting...');
+    if (socketRef.current) {
+      const payload = JSON.stringify({ request: "Connect", passkey: "TALHA_SECURE_SYNC_2026" });
+      socketRef.current.send(payload, undefined, undefined, 8080, hostIPRef.current);
+      appendLog({ type: 'link', title: 'Handshake Sent', subtitle: hostIPRef.current, time: nowTime() });
+    }
+  };
+
+  const handleDisconnect = () => {
+    if (socketRef.current) {
+      const payload = JSON.stringify({ request: "Disconnect", passkey: "TALHA_SECURE_SYNC_2026" });
+      socketRef.current.send(payload, undefined, undefined, 8080, hostIPRef.current);
+    }
+    setSignal('Offline');
+    appendLog({ type: 'link', title: 'Disconnected from Host', subtitle: 'User initiated', time: nowTime() });
+  };
 
   // ── Background Audio Loop ───────────────────────────────────────────────────
   useEffect(() => {
@@ -468,7 +496,6 @@ export default function App() {
 
       socket.bind(8080, () => {
         console.log('[UDP] Bound to Command Port 8080');
-        setSignal('Connected');
       });
       audioSocket.bind(8081, () => console.log('[UDP] Bound to Audio Port 8081'));
 
@@ -486,7 +513,13 @@ export default function App() {
           const payload = JSON.parse(msg.toString());
           const time = nowTime();
 
-          if (payload.type === 'CALL_ALERT') {
+          if (payload.status === 'CONNECTED') {
+            setSignal('Connected');
+            appendLog({ type: 'link', title: 'Connected to Host', subtitle: hostIPRef.current, time });
+          } else if (payload.status === 'DISCONNECTED') {
+            setSignal('Offline');
+            appendLog({ type: 'link', title: 'Session Terminated', subtitle: payload.message || 'Graceful disconnect', time });
+          } else if (payload.type === 'CALL_ALERT') {
             const num = payload.number || 'Unknown';
             setCallerNumber(num);
             setCallStatus('RINGING');
@@ -509,7 +542,7 @@ export default function App() {
             Notifications.dismissAllNotificationsAsync();
             appendLog({
               type: 'call',
-              title: payload.type === 'CALL_CANCEL' ? 'Call Dismissed on Host' : 'Call Ended',
+              title: payload.type === 'CALL_CANCEL' ? (reason === 'ANSWERED_ON_HOST' ? 'Answered on Host' : 'Call Dismissed on Host') : 'Call Ended',
               subtitle: reason,
               time,
             });
@@ -603,7 +636,7 @@ export default function App() {
       </SafeAreaView>
 
       {/* ── Dynamic Screen Content ── */}
-      {activeTab === 'Status' && <StatusScreen signal={signal} uptime={uptime} activityLog={activityLog} />}
+      {activeTab === 'Status' && <StatusScreen signal={signal} uptime={uptime} activityLog={activityLog} onConnect={handleConnect} onDisconnect={handleDisconnect} />}
       {activeTab === 'Network' && <NetworkScreen hostIP={hostIP} onSaveIP={handleSaveIP} />}
       {activeTab === 'Logs' && <LogsScreen activityLog={activityLog} />}
       {activeTab === 'Settings' && <SettingsScreen />}
@@ -657,6 +690,9 @@ const styles = StyleSheet.create({
   statusTextBlock: { alignItems: 'center' },
   statusPrimary: { color: C.green, fontSize: 16, fontWeight: '600', letterSpacing: -0.2, marginBottom: 6 },
   statusSecondary: { color: C.gray, fontSize: 13, letterSpacing: 0.1 },
+  connectButton: { marginTop: 16, backgroundColor: C.green, paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20 },
+  disconnectButton: { backgroundColor: C.red },
+  connectButtonText: { color: C.black, fontWeight: '600', fontSize: 14 },
   monoGreen: { color: C.green, fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace', fontWeight: '600' },
   listCard: { backgroundColor: C.surfaceSolid, borderRadius: 12, borderWidth: 0.5, borderColor: C.border, overflow: 'hidden' },
   listRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12 },
