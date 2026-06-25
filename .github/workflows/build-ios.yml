@@ -1,0 +1,70 @@
+name: Build iOS Device Binary
+
+# Trigger manually from GitHub Actions tab
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    name: Build unsigned ARM64 IPA
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      # ── 1. Checkout code ──
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Setup Node.js ──
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # ── 3. Install JS dependencies ──
+      - name: Install npm dependencies
+        run: npm ci
+
+      # ── 4. Generate native iOS project via Expo prebuild ──
+      - name: Generate native iOS project
+        run: npx expo prebuild --platform ios --clean --no-install
+
+      # ── 5. Install CocoaPods dependencies ──
+      - name: Install CocoaPods
+        working-directory: ios
+        run: pod install
+
+      # ── 6. Build unsigned .app for ARM64 device architecture ──
+      # CODE_SIGNING_ALLOWED=NO produces an unsigned binary.
+      # Sideloadly will re-sign it with your free Apple ID.
+      - name: Build for device (arm64, unsigned)
+        run: |
+          xcodebuild \
+            -workspace ios/LocalLinkClient.xcworkspace \
+            -scheme LocalLinkClient \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            -destination "generic/platform=iOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            -derivedDataPath build \
+            -quiet
+
+      # ── 7. Package into .ipa for Sideloadly ──
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/LocalLinkClient.app Payload/
+          zip -r -9 LocalLinkClient-device.ipa Payload
+
+      # ── 8. Upload as downloadable artifact ──
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalLinkClient-Device-IPA
+          path: LocalLinkClient-device.ipa
+          retention-days: 30
