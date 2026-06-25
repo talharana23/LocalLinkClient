@@ -1,7 +1,9 @@
 name: Build iOS Device Binary
 
-# Trigger manually from GitHub Actions tab
+# Trigger manually from GitHub Actions tab, or on push
 on:
+  push:
+    branches: [master, main]
   workflow_dispatch:
 
 jobs:
