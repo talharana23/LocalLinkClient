@@ -236,7 +236,7 @@ function StatusScreen({ signal, uptime, activityLog, onConnect, onDisconnect }) 
   );
 }
 
-function NetworkScreen({ hostIP, onSaveIP }) {
+function NetworkScreen({ hostIP, onSaveIP, onDiscover }) {
   const [tempIP, setTempIP] = useState(hostIP);
 
   useEffect(() => { setTempIP(hostIP); }, [hostIP]);
@@ -244,6 +244,10 @@ function NetworkScreen({ hostIP, onSaveIP }) {
   return (
     <ScrollView contentContainerStyle={styles.scrollBody} showsVerticalScrollIndicator={false}>
       <Text style={styles.pageTitle}>Network Diagnostics</Text>
+
+      <TouchableOpacity style={styles.discoverButton} onPress={onDiscover}>
+        <Text style={styles.discoverButtonText}>Scan / Auto-Connect</Text>
+      </TouchableOpacity>
       
       <View style={styles.section}>
         <Text style={styles.sectionLabel}>CONNECTION DETAILS</Text>
@@ -445,11 +449,19 @@ export default function App() {
 
   const handleDisconnect = () => {
     if (socketRef.current) {
-      const payload = JSON.stringify({ request: "Disconnect", passkey: "TALHA_SECURE_SYNC_2026" });
+      const payload = JSON.stringify({ type: "Disconnect", passkey: "TALHA_SECURE_SYNC_2026" });
       socketRef.current.send(payload, undefined, undefined, 8080, hostIPRef.current);
     }
     setSignal('Offline');
     appendLog({ type: 'link', title: 'Disconnected from Host', subtitle: 'User initiated', time: nowTime() });
+  };
+
+  const handleDiscover = () => {
+    if (socketRef.current) {
+      const payload = JSON.stringify({ request: "Connect", passkey: "TALHA_SECURE_SYNC_2026" });
+      socketRef.current.send(payload, undefined, undefined, 8080, "255.255.255.255");
+      appendLog({ type: 'link', title: 'Discovery Broadcast', subtitle: 'Scanning network...', time: nowTime() });
+    }
   };
 
   // ── Background Audio Loop ───────────────────────────────────────────────────
@@ -496,6 +508,7 @@ export default function App() {
 
       socket.bind(8080, () => {
         console.log('[UDP] Bound to Command Port 8080');
+        try { socket.setBroadcast(true); } catch(e) {}
       });
       audioSocket.bind(8081, () => console.log('[UDP] Bound to Audio Port 8081'));
 
@@ -508,10 +521,19 @@ export default function App() {
       });
 
       // 8080 Command Receiver
-      socket.on('message', (msg) => {
+      socket.on('message', (msg, rinfo) => {
         try {
           const payload = JSON.parse(msg.toString());
           const time = nowTime();
+
+          // Auto-Discovery: If we receive any known Host packet from a new IP, hook onto it!
+          if (rinfo && rinfo.address && rinfo.address !== hostIPRef.current) {
+            if (payload.status === 'CONNECTED' || payload.type === 'CALL_ALERT' || payload.status === 'DISCONNECTED') {
+               setHostIP(rinfo.address);
+               hostIPRef.current = rinfo.address;
+               AsyncStorage.setItem('hostIP', rinfo.address);
+            }
+          }
 
           if (payload.status === 'CONNECTED') {
             setSignal('Connected');
@@ -530,7 +552,7 @@ export default function App() {
                 title: "Incoming Call",
                 body: `Call from ${num}`,
                 sound: true,
-                priority: Notifications.AndroidNotificationPriority.HIGH,
+                priority: Notifications.AndroidNotificationPriority.MAX,
               },
               trigger: null,
             });
@@ -637,7 +659,7 @@ export default function App() {
 
       {/* ── Dynamic Screen Content ── */}
       {activeTab === 'Status' && <StatusScreen signal={signal} uptime={uptime} activityLog={activityLog} onConnect={handleConnect} onDisconnect={handleDisconnect} />}
-      {activeTab === 'Network' && <NetworkScreen hostIP={hostIP} onSaveIP={handleSaveIP} />}
+      {activeTab === 'Network' && <NetworkScreen hostIP={hostIP} onSaveIP={handleSaveIP} onDiscover={handleDiscover} />}
       {activeTab === 'Logs' && <LogsScreen activityLog={activityLog} />}
       {activeTab === 'Settings' && <SettingsScreen />}
 
@@ -709,6 +731,8 @@ const styles = StyleSheet.create({
   settingValueText: { color: C.gray, fontSize: 16 },
   monoValue: { color: C.gray, fontSize: 15, fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace' },
   textInput: { color: C.green, fontFamily: Platform.OS === 'ios' ? 'Courier New' : 'monospace', fontSize: 16, padding: 0, margin: 0, minWidth: 140, textAlign: 'right' },
+  discoverButton: { backgroundColor: '#3a3a3c', padding: 12, borderRadius: 8, alignItems: 'center', marginBottom: 24, borderWidth: 0.5, borderColor: C.border },
+  discoverButtonText: { color: C.white, fontWeight: '600', fontSize: 15 },
   metricsRow: { flexDirection: 'row', marginBottom: 20 },
   metricCard: { flex: 1, backgroundColor: C.surfaceSolid, borderRadius: 12, borderWidth: 0.5, borderColor: C.border, padding: 14 },
   metricValueWrap: { marginTop: 8 },
