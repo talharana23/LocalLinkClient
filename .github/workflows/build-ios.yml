@@ -35,7 +35,7 @@ jobs:
       # ── 5. Install CocoaPods dependencies ──
       - name: Install CocoaPods
         working-directory: ios
-        run: pod install
+        run: npx pod-install
 
       # ── 6. Build unsigned .app for ARM64 device architecture ──
       # CODE_SIGNING_ALLOWED=NO produces an unsigned binary.
@@ -53,8 +53,7 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
-            -derivedDataPath build \
-            -quiet
+            -derivedDataPath build
 
       # ── 7. Package into .ipa for Sideloadly ──
       - name: Package IPA
