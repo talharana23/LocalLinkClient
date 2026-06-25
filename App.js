@@ -23,6 +23,7 @@ import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { Buffer } from 'buffer';
+import InCallManager from 'react-native-incall-manager';
 
 // ── Background Notification Setup ──
 Notifications.setNotificationHandler({
@@ -158,6 +159,44 @@ function IncomingCallOverlay({ number, onDecline, onAnswer }) {
           <SafeAreaView style={{ height: 20 }} />
         </Animated.View>
       </Animated.View>
+    </Modal>
+  );
+}
+
+
+// ─── Active Call Screen ────────────────────────────────────────────────────────
+function ActiveCallScreen({ number, onMute, onSpeaker, onEndCall, isMuted, isSpeakerOn }) {
+  return (
+    <Modal visible transparent animationType="fade" statusBarTranslucent>
+      <StatusBar barStyle="light-content" backgroundColor="transparent" translucent />
+      <BlurView intensity={95} tint="dark" style={[styles.callOverlayRoot, { justifyContent: 'center' }]}>
+        <SafeAreaView style={{ flex: 1, alignItems: 'center' }}>
+          <Text style={[styles.callNumberLabel, { marginTop: 80 }]}>{number}</Text>
+          <Text style={styles.callSubLabel}>Active Call</Text>
+          
+          <View style={{ flexDirection: 'row', marginTop: 100, gap: 40 }}>
+            <TouchableOpacity onPress={onMute} style={{ alignItems: 'center' }}>
+              <View style={[styles.callActionBtn, isMuted ? styles.callActionActive : null]}>
+                <MaterialCommunityIcons name={isMuted ? "microphone-off" : "microphone"} size={32} color={isMuted ? "black" : "white"} />
+              </View>
+              <Text style={styles.callButtonLabel}>Mute</Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity onPress={onSpeaker} style={{ alignItems: 'center' }}>
+              <View style={[styles.callActionBtn, isSpeakerOn ? styles.callActionActive : null]}>
+                <MaterialCommunityIcons name={isSpeakerOn ? "volume-high" : "volume-medium"} size={32} color={isSpeakerOn ? "black" : "white"} />
+              </View>
+              <Text style={styles.callButtonLabel}>Speaker</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={{ position: 'absolute', bottom: 60, width: '100%', alignItems: 'center' }}>
+            <TouchableOpacity style={styles.callDeclineButton} onPress={onEndCall} activeOpacity={0.75}>
+              <MaterialCommunityIcons name="phone-hangup" size={36} color="#ffffff" />
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </BlurView>
     </Modal>
   );
 }
@@ -398,8 +437,13 @@ function SettingsScreen() {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function App() {
-  const [callStatus, setCallStatus]   = useState('IDLE'); // 'IDLE' | 'RINGING'
+  const [callStatus, setCallStatus]   = useState('IDLE'); // 'IDLE' | 'RINGING' | 'ACTIVE'
   const [callerNumber, setCallerNumber] = useState('');
+  const [isMuted, setIsMuted] = useState(false);
+  const [isSpeakerOn, setIsSpeakerOn] = useState(false);
+  const isMutedRef = useRef(false);
+
+  useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
   const [signal, setSignal]            = useState('Offline');
   const [uptime]                       = useState('Online');
   const [activityLog, setActivityLog]  = useState([]);
@@ -558,12 +602,14 @@ export default function App() {
               },
               trigger: null,
             });
+            try { InCallManager.startRingtone('_BUNDLE_'); } catch(e) {}
           } else if (payload.type === 'CALL_CANCEL' || payload.type === 'CALL_ENDED') {
             const reason = payload.reason || payload.type;
             setCallStatus('IDLE');
             setCallerNumber('');
             AudioBridge.stop();
             Notifications.dismissAllNotificationsAsync();
+            try { InCallManager.stopRingtone(); InCallManager.stop(); } catch(e) {}
             appendLog({
               type: 'call',
               title: payload.type === 'CALL_CANCEL' ? (reason === 'ANSWERED_ON_HOST' ? 'Answered on Host' : 'Call Dismissed on Host') : 'Call Ended',
@@ -597,6 +643,7 @@ export default function App() {
     setCallStatus('IDLE');
     setCallerNumber('');
     Notifications.dismissAllNotificationsAsync();
+    try { InCallManager.stopRingtone(); InCallManager.stop(); } catch(e) {}
     
     if (socketRef.current) {
       const payload = JSON.stringify({ type: "CALL_ANSWERED", action: "DECLINE" });
@@ -611,9 +658,16 @@ export default function App() {
       subtitle: callerNumber,
       time: nowTime(),
     });
-    setCallStatus('IDLE'); // Hide UI once answered to just stream audio
-    setCallerNumber('');
+    setCallStatus('ACTIVE');
     Notifications.dismissAllNotificationsAsync();
+
+    try {
+      InCallManager.stopRingtone();
+      InCallManager.start({ media: 'audio' });
+      InCallManager.setForceSpeakerphoneOn(false);
+      setIsSpeakerOn(false);
+      setIsMuted(false);
+    } catch(e) {}
 
     // Tell host we answered
     if (socketRef.current) {
@@ -623,11 +677,34 @@ export default function App() {
     
     // Start microphone streaming to Host IP
     AudioBridge.start((data) => {
-      if (audioSocketRef.current) {
+      if (audioSocketRef.current && !isMutedRef.current) {
         const buffer = Buffer.from(data, 'base64');
         audioSocketRef.current.send(buffer, 0, buffer.length, 8081, hostIPRef.current, (err) => {});
       }
     });
+  }
+
+  function handleEndCall() {
+    setCallStatus('IDLE');
+    setCallerNumber('');
+    AudioBridge.stop();
+    try { InCallManager.stop(); } catch(e) {}
+    
+    if (socketRef.current) {
+      const payload = JSON.stringify({ type: "CALL_ANSWERED", action: "DECLINE" });
+      socketRef.current.send(payload, 0, payload.length, 8080, hostIPRef.current);
+    }
+    appendLog({ type: 'call', title: 'Call Ended', subtitle: 'User disconnected', time: nowTime() });
+  }
+
+  function toggleMute() {
+    setIsMuted(!isMuted);
+  }
+
+  function toggleSpeaker() {
+    const nextState = !isSpeakerOn;
+    setIsSpeakerOn(nextState);
+    try { InCallManager.setForceSpeakerphoneOn(nextState); } catch(e) {}
   }
 
   return (
@@ -640,6 +717,18 @@ export default function App() {
           number={callerNumber}
           onDecline={handleDecline}
           onAnswer={handleAnswer}
+        />
+      )}
+
+      {/* ── Active Call Screen ── */}
+      {callStatus === 'ACTIVE' && (
+        <ActiveCallScreen
+          number={callerNumber}
+          onMute={toggleMute}
+          onSpeaker={toggleSpeaker}
+          onEndCall={handleEndCall}
+          isMuted={isMuted}
+          isSpeakerOn={isSpeakerOn}
         />
       )}
 
@@ -765,4 +854,6 @@ const styles = StyleSheet.create({
   callDeclineButton: { width: 76, height: 76, borderRadius: 38, backgroundColor: '#FF3B30', alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
   callAnswerButton: { width: 76, height: 76, borderRadius: 38, backgroundColor: '#34C759', alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
   callButtonLabel: { color: '#ffffff', fontSize: 15, fontWeight: '400', letterSpacing: 0.1 },
+  callActionBtn: { width: 70, height: 70, borderRadius: 35, backgroundColor: '#333', alignItems: 'center', justifyContent: 'center', marginBottom: 8 },
+  callActionActive: { backgroundColor: '#fff' },
 });
