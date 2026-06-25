@@ -23,6 +23,12 @@
         {
           "microphonePermission": "Local Link requires microphone access to stream two-way audio to the Host."
         }
+      ],
+      [
+        "expo-notifications",
+        {
+          "sounds": ["./assets/ringtone.wav"]
+        }
       ]
     ],
     "android": {

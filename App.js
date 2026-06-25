@@ -22,6 +22,8 @@ import { Audio } from 'expo-av';
 import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import { Buffer } from 'buffer';
+
 // ── Background Notification Setup ──
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -442,7 +444,7 @@ export default function App() {
     setSignal('Connecting...');
     if (socketRef.current) {
       const payload = JSON.stringify({ request: "Connect", passkey: "TALHA_SECURE_SYNC_2026" });
-      socketRef.current.send(payload, undefined, undefined, 8080, hostIPRef.current);
+      socketRef.current.send(payload, 0, payload.length, 8080, hostIPRef.current);
       appendLog({ type: 'link', title: 'Handshake Sent', subtitle: hostIPRef.current, time: nowTime() });
     }
   };
@@ -450,7 +452,7 @@ export default function App() {
   const handleDisconnect = () => {
     if (socketRef.current) {
       const payload = JSON.stringify({ type: "Disconnect", passkey: "TALHA_SECURE_SYNC_2026" });
-      socketRef.current.send(payload, undefined, undefined, 8080, hostIPRef.current);
+      socketRef.current.send(payload, 0, payload.length, 8080, hostIPRef.current);
     }
     setSignal('Offline');
     appendLog({ type: 'link', title: 'Disconnected from Host', subtitle: 'User initiated', time: nowTime() });
@@ -459,7 +461,7 @@ export default function App() {
   const handleDiscover = () => {
     if (socketRef.current) {
       const payload = JSON.stringify({ request: "Connect", passkey: "TALHA_SECURE_SYNC_2026" });
-      socketRef.current.send(payload, undefined, undefined, 8080, "255.255.255.255");
+      socketRef.current.send(payload, 0, payload.length, 8080, "255.255.255.255");
       appendLog({ type: 'link', title: 'Discovery Broadcast', subtitle: 'Scanning network...', time: nowTime() });
     }
   };
@@ -551,7 +553,7 @@ export default function App() {
               content: {
                 title: "Incoming Call",
                 body: `Call from ${num}`,
-                sound: true,
+                sound: 'ringtone.wav',
                 priority: Notifications.AndroidNotificationPriority.MAX,
               },
               trigger: null,
@@ -598,7 +600,7 @@ export default function App() {
     
     if (socketRef.current) {
       const payload = JSON.stringify({ type: "CALL_ANSWERED", action: "DECLINE" });
-      socketRef.current.send(payload, undefined, undefined, 8080, hostIPRef.current);
+      socketRef.current.send(payload, 0, payload.length, 8080, hostIPRef.current);
     }
   }
 
@@ -616,7 +618,7 @@ export default function App() {
     // Tell host we answered
     if (socketRef.current) {
       const payload = JSON.stringify({ type: "CALL_ANSWERED", action: "ACCEPT" });
-      socketRef.current.send(payload, undefined, undefined, 8080, hostIPRef.current);
+      socketRef.current.send(payload, 0, payload.length, 8080, hostIPRef.current);
     }
     
     // Start microphone streaming to Host IP
