@@ -21,6 +21,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as FileSystem from 'expo-file-system';
 
 import { Buffer } from 'buffer';
 import InCallManager from 'react-native-incall-manager';
@@ -65,16 +66,97 @@ class AudioBridge {
   static stop() {
     try { if (LiveAudioStream) LiveAudioStream.stop(); } catch (e) {}
   }
-  static write(base64Chunk) {
-    try {
-      if (LiveAudioStream && typeof LiveAudioStream.write === 'function') {
-        LiveAudioStream.write(base64Chunk);
-      }
-    } catch (e) {}
-  }
 }
 
 AudioBridge.init();
+
+// ── PCM Player: plays incoming raw PCM audio via expo-av + temp WAV files ──
+// Android Host sends raw PCM bytes on port 8081. We buffer them, wrap in a WAV
+// header, write to a temp file, and play with Audio.Sound. Double-buffered
+// (alternating 2 file slots) so playback is near-continuous.
+class PCMPlayer {
+  constructor() {
+    this.active = false;
+    this.chunks = [];
+    this.timer = null;
+    this.sounds = [null, null];
+    this.fileIdx = 0;
+  }
+
+  async start() {
+    this.active = true;
+    this.chunks = [];
+    this.fileIdx = 0;
+    // Set audio mode for voice-call playback
+    try {
+      await Audio.setAudioModeAsync({
+        staysActiveInBackground: true,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: false,
+        playThroughEarpieceAndroid: false,
+      });
+    } catch (e) {}
+    // Flush every 200ms (~4-5 chunks of audio)
+    this.timer = setInterval(() => this._flush(), 200);
+  }
+
+  feed(rawPcmBuffer) {
+    if (this.active) this.chunks.push(rawPcmBuffer);
+  }
+
+  async _flush() {
+    if (this.chunks.length === 0) return;
+    const batch = this.chunks.splice(0);
+    const pcm = Buffer.concat(batch);
+    if (pcm.length === 0) return;
+
+    const wav = PCMPlayer.createWav(pcm);
+    const slot = this.fileIdx % 2;
+    this.fileIdx++;
+    const uri = FileSystem.cacheDirectory + `_call_pcm_${slot}.wav`;
+
+    try {
+      await FileSystem.writeAsStringAsync(uri, wav.toString('base64'), {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      // Unload previous sound in this slot
+      if (this.sounds[slot]) {
+        try { await this.sounds[slot].unloadAsync(); } catch (_) {}
+      }
+      const { sound } = await Audio.Sound.createAsync(
+        { uri },
+        { shouldPlay: true, volume: 1.0 }
+      );
+      this.sounds[slot] = sound;
+    } catch (e) {
+      console.warn('[PCMPlayer] flush error:', e.message);
+    }
+  }
+
+  async stop() {
+    this.active = false;
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    this.chunks = [];
+    for (const s of this.sounds) {
+      if (s) try { await s.unloadAsync(); } catch (_) {}
+    }
+    this.sounds = [null, null];
+  }
+
+  // Build a valid WAV file from raw PCM data (16-bit, mono, 44100Hz)
+  static createWav(pcmData) {
+    const n = pcmData.length;
+    const h = Buffer.alloc(44);
+    h.write('RIFF', 0);       h.writeUInt32LE(36 + n, 4);
+    h.write('WAVE', 8);       h.write('fmt ', 12);
+    h.writeUInt32LE(16, 16);  h.writeUInt16LE(1, 20);       // PCM format
+    h.writeUInt16LE(1, 22);   h.writeUInt32LE(44100, 24);   // Mono, 44100 Hz
+    h.writeUInt32LE(88200, 28); h.writeUInt16LE(2, 32);     // Byte rate, block align
+    h.writeUInt16LE(16, 34);  h.write('data', 36);          // 16-bit
+    h.writeUInt32LE(n, 40);
+    return Buffer.concat([h, pcmData]);
+  }
+}
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -455,6 +537,7 @@ export default function App() {
   const audioSocketRef = useRef(null);
   const hostIPRef = useRef(hostIP);
   const ringtoneRef = useRef(null);
+  const pcmPlayerRef = useRef(new PCMPlayer());
 
   const TABS = [
     { key: 'Status',  icon: '◉'  },
@@ -567,6 +650,10 @@ export default function App() {
   };
 
   // ── Background Audio Loop ───────────────────────────────────────────────────
+  // Generate a proper 1-second silent WAV at runtime and loop it.
+  // The old silent.wav was only 44 bytes (just a header, no audio data).
+  // iOS detects zero-length audio and suspends the app, killing the UDP socket.
+  // A real 1-second WAV with actual (silent) samples keeps the audio session alive.
   useEffect(() => {
     let soundObj = null;
     async function startSilentLoop() {
@@ -577,12 +664,21 @@ export default function App() {
           shouldDuckAndroid: false,
           playThroughEarpieceAndroid: false,
         });
+
+        // Generate 1 second of silence (44100 samples × 2 bytes = 88200 bytes of PCM)
+        const silentPcm = Buffer.alloc(88200, 0);
+        const silentWav = PCMPlayer.createWav(silentPcm);
+        const silentUri = FileSystem.cacheDirectory + '_bg_silent.wav';
+        await FileSystem.writeAsStringAsync(silentUri, silentWav.toString('base64'), {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+
         const { sound } = await Audio.Sound.createAsync(
-          require('./assets/silent.wav'),
-          { isLooping: true, shouldPlay: true, volume: 0 }
+          { uri: silentUri },
+          { isLooping: true, shouldPlay: true, volume: 0.01 }
         );
         soundObj = sound;
-        console.log('[AudioLoop] Background execution active.');
+        console.log('[AudioLoop] Background keepalive active (generated 1s silent WAV).');
       } catch (e) {
         console.warn('[AudioLoop] Failed:', e.message);
       }
@@ -615,11 +711,11 @@ export default function App() {
       audioSocket.bind(8081, () => console.log('[UDP] Bound to Audio Port 8081'));
 
       // 8081 Audio Receiver (Playing Host Audio)
-      // Host sends Base64 strings over UDP — decode the buffer as UTF-8 to get the original Base64 text
+      // Android Host now sends RAW PCM bytes (not Base64). We feed them
+      // directly to the PCMPlayer which buffers, wraps in WAV, and plays.
       audioSocket.on('message', (msg) => {
         try {
-          const base64Chunk = msg.toString('utf8');
-          AudioBridge.write(base64Chunk);
+          pcmPlayerRef.current.feed(msg);
         } catch (e) {}
       });
 
@@ -669,6 +765,7 @@ export default function App() {
             setCallStatus('IDLE');
             setCallerNumber('');
             AudioBridge.stop();
+            pcmPlayerRef.current.stop();
             Notifications.dismissAllNotificationsAsync();
             stopRingtoneSound();
             try { InCallManager.stopRingtone(); InCallManager.stop(); } catch(e) {}
@@ -695,7 +792,7 @@ export default function App() {
 
   // ── Ringing overlay handlers ────────────────────────────────────────────────
 
-  function handleDecline() {
+  async function handleDecline() {
     appendLog({
       type: 'call',
       title: 'Call Declined Locally',
@@ -705,7 +802,7 @@ export default function App() {
     setCallStatus('IDLE');
     setCallerNumber('');
     Notifications.dismissAllNotificationsAsync();
-    stopRingtoneSound();
+    await stopRingtoneSound();
     try { InCallManager.stopRingtone(); InCallManager.stop(); } catch(e) {}
     
     if (socketRef.current) {
@@ -714,7 +811,7 @@ export default function App() {
     }
   }
 
-  function handleAnswer() {
+  async function handleAnswer() {
     appendLog({
       type: 'call',
       title: 'Answered on Device',
@@ -723,7 +820,10 @@ export default function App() {
     });
     setCallStatus('ACTIVE');
     Notifications.dismissAllNotificationsAsync();
-    stopRingtoneSound();
+
+    // IMPORTANT: await the ringtone stop to fully release the audio session
+    // before InCallManager takes over. Without await, audio session conflict → crash.
+    await stopRingtoneSound();
 
     try {
       InCallManager.stopRingtone();
@@ -738,14 +838,17 @@ export default function App() {
       const payload = JSON.stringify({ type: "CALL_ANSWERED", action: "ACCEPT" });
       socketRef.current.send(payload, 0, payload.length, 8080, hostIPRef.current);
     }
+
+    // Start the PCM player to hear Android's audio
+    await pcmPlayerRef.current.start();
     
     // Start microphone streaming to Host IP
-    // LiveAudioStream provides data as a Base64 string. The Host expects a Base64 string
-    // over UDP, so we send the string as UTF-8 bytes (NOT decoded PCM bytes).
+    // LiveAudioStream provides data as a Base64 string.
+    // Android Host now accepts raw PCM bytes, so we decode Base64 → raw bytes before sending.
     AudioBridge.start((data) => {
       if (audioSocketRef.current && !isMutedRef.current) {
-        const b64Buf = Buffer.from(data, 'utf8');
-        audioSocketRef.current.send(b64Buf, 0, b64Buf.length, 8081, hostIPRef.current, (err) => {});
+        const pcmBytes = Buffer.from(data, 'base64');
+        audioSocketRef.current.send(pcmBytes, 0, pcmBytes.length, 8081, hostIPRef.current, (err) => {});
       }
     });
   }
@@ -754,6 +857,7 @@ export default function App() {
     setCallStatus('IDLE');
     setCallerNumber('');
     AudioBridge.stop();
+    pcmPlayerRef.current.stop();
     try { InCallManager.stop(); } catch(e) {}
     
     if (socketRef.current) {
