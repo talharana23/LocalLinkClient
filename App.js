@@ -539,38 +539,6 @@ export default function App() {
     { key: 'Settings',icon: '⚙'  },
   ];
 
-  // ── Helper: stop the foreground ringtone ──
-  // ── Helper: stop the foreground ringtone ──
-  async function stopRingtoneSound() {
-    try {
-      if (ringtoneRef.current) {
-        await ringtoneRef.current.stopAsync();
-        await ringtoneRef.current.unloadAsync();
-        ringtoneRef.current = null;
-      }
-    } catch (e) {}
-  }
-
-  // ── Helper: play the foreground ringtone ──
-  async function playRingtoneSound() {
-    try {
-      await stopRingtoneSound();
-      await Audio.setAudioModeAsync({
-        staysActiveInBackground: true,
-        playsInSilentModeIOS: true,
-        shouldDuckAndroid: false,
-        playThroughEarpieceAndroid: false,
-      });
-      const { sound } = await Audio.Sound.createAsync(
-        require('./assets/ringtone.wav'),
-        { isLooping: true, shouldPlay: true, volume: 1.0 }
-      );
-      ringtoneRef.current = sound;
-    } catch (e) {
-      console.warn('[Ringtone] Play failed:', e.message);
-    }
-  }
-
   // ── Helper: Start Background Keepalive ──
   // InCallManager.stop() deactivates the iOS AVAudioSession, which kills our background audio loop.
   // We must re-init it whenever we go back to IDLE to ensure we can receive the next call in the background.
@@ -712,7 +680,15 @@ export default function App() {
       // directly to the PCMPlayer which buffers, wraps in WAV, and plays.
       audioSocket.on('message', (msg) => {
         try {
-          pcmPlayerRef.current.feed(msg);
+          let buf;
+          if (typeof msg === 'string') {
+            buf = Buffer.from(msg, 'base64');
+          } else if (Buffer.isBuffer(msg)) {
+            buf = msg;
+          } else {
+            buf = Buffer.from(msg);
+          }
+          pcmPlayerRef.current.feed(buf);
         } catch (e) {}
       });
 
@@ -747,16 +723,16 @@ export default function App() {
                 content: {
                   title: `Incoming Call — ${num}`,
                   body: 'Tap to receive call',
-                  sound: null, // Silent notification to prevent ducking
+                  sound: 'default',
                   priority: Notifications.AndroidNotificationPriority.MAX,
                   sticky: true,
                   ...(Platform.OS === 'android' ? { channelId: 'incoming-calls' } : {}),
                 },
                 trigger: null,
-              });
-              // Play custom ringtone to ensure it rings in background without interruption
-              playRingtoneSound();
-              try { InCallManager.startRingtone('_BUNDLE_'); } catch(e) {}
+              }).catch(e => console.warn('[Notif Error]', e));
+              
+              // Play default ringtone in foreground via InCallManager
+              try { InCallManager.startRingtone('_DEFAULT_'); } catch(e) {}
             } else if (payload.type === 'CALL_CANCEL' || payload.type === 'CALL_ENDED') {
               const reason = payload.reason || payload.type;
               setCallStatus('IDLE');
@@ -764,11 +740,11 @@ export default function App() {
               AudioBridge.stop();
               pcmPlayerRef.current.stop();
               Notifications.dismissAllNotificationsAsync();
-              stopRingtoneSound();
+              
               try { InCallManager.stopRingtone(); InCallManager.stop(); } catch(e) {}
               
-              // Restart keepalive loop because InCallManager.stop() deactivated the audio session
-              startKeepAlive();
+              // Restart keepalive loop with a delay so InCallManager finishes deactivating session
+              setTimeout(() => startKeepAlive(), 1000);
 
               appendLog({
                 type: 'call',
@@ -803,11 +779,11 @@ export default function App() {
     setCallStatus('IDLE');
     setCallerNumber('');
     Notifications.dismissAllNotificationsAsync();
-    await stopRingtoneSound();
+    
     try { InCallManager.stopRingtone(); InCallManager.stop(); } catch(e) {}
     
-    // Restart keepalive loop because InCallManager.stop() deactivated the audio session
-    startKeepAlive();
+    // Restart keepalive loop with a delay so InCallManager finishes deactivating session
+    setTimeout(() => startKeepAlive(), 1000);
     
     if (socketRef.current) {
       const payload = JSON.stringify({ type: "CALL_ANSWERED", action: "DECLINE" });
@@ -824,9 +800,6 @@ export default function App() {
     });
     setCallStatus('ACTIVE');
     Notifications.dismissAllNotificationsAsync();
-
-    // MUST await ringtone stop to prevent AudioSession crash when InCallManager starts
-    await stopRingtoneSound();
 
     try {
       InCallManager.stopRingtone();
@@ -863,8 +836,8 @@ export default function App() {
     pcmPlayerRef.current.stop();
     try { InCallManager.stop(); } catch(e) {}
     
-    // Restart keepalive loop because InCallManager.stop() deactivated the audio session
-    startKeepAlive();
+    // Restart keepalive loop with a delay so InCallManager finishes deactivating session
+    setTimeout(() => startKeepAlive(), 1000);
     
     if (socketRef.current) {
       const payload = JSON.stringify({ type: "CALL_ANSWERED", action: "DECLINE" });
