@@ -454,6 +454,7 @@ export default function App() {
   const socketRef = useRef(null);
   const audioSocketRef = useRef(null);
   const hostIPRef = useRef(hostIP);
+  const ringtoneRef = useRef(null);
 
   const TABS = [
     { key: 'Status',  icon: '◉'  },
@@ -461,6 +462,37 @@ export default function App() {
     { key: 'Logs',    icon: '≡'  },
     { key: 'Settings',icon: '⚙'  },
   ];
+
+  // ── Helper: stop the foreground ringtone ──
+  async function stopRingtoneSound() {
+    try {
+      if (ringtoneRef.current) {
+        await ringtoneRef.current.stopAsync();
+        await ringtoneRef.current.unloadAsync();
+        ringtoneRef.current = null;
+      }
+    } catch (e) {}
+  }
+
+  // ── Helper: play the foreground ringtone ──
+  async function playRingtoneSound() {
+    try {
+      await stopRingtoneSound();
+      await Audio.setAudioModeAsync({
+        staysActiveInBackground: true,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: false,
+        playThroughEarpieceAndroid: false,
+      });
+      const { sound } = await Audio.Sound.createAsync(
+        require('./assets/ringtone.wav'),
+        { isLooping: true, shouldPlay: true, volume: 1.0 }
+      );
+      ringtoneRef.current = sound;
+    } catch (e) {
+      console.warn('[Ringtone] Play failed:', e.message);
+    }
+  }
 
   useEffect(() => {
     AsyncStorage.getItem('hostIP').then(ip => {
@@ -472,6 +504,30 @@ export default function App() {
     
     // Request notification permissions
     Notifications.requestPermissionsAsync();
+
+    // ── Create Android notification channel with MAX importance & custom sound ──
+    if (Platform.OS === 'android') {
+      Notifications.setNotificationChannelAsync('incoming-calls', {
+        name: 'Incoming Calls',
+        importance: Notifications.AndroidImportance.MAX,
+        sound: 'ringtone.wav',
+        vibrationPattern: [0, 500, 250, 500],
+        lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+        bypassDnd: true,
+        enableVibrate: true,
+      });
+    }
+
+    // ── Notification tap listener — brings app to foreground showing the call UI ──
+    const notifResponseSub = Notifications.addNotificationResponseReceivedListener(response => {
+      // When user taps the notification, the app is brought to foreground automatically.
+      // The RINGING state and overlay are already set, so user will see the call screen.
+      console.log('[Notification] User tapped notification to receive call.');
+    });
+
+    return () => {
+      notifResponseSub.remove();
+    };
   }, []);
 
   const handleSaveIP = (ip) => {
@@ -559,9 +615,10 @@ export default function App() {
       audioSocket.bind(8081, () => console.log('[UDP] Bound to Audio Port 8081'));
 
       // 8081 Audio Receiver (Playing Host Audio)
+      // Host sends Base64 strings over UDP — decode the buffer as UTF-8 to get the original Base64 text
       audioSocket.on('message', (msg) => {
         try {
-          const base64Chunk = msg.toString('base64');
+          const base64Chunk = msg.toString('utf8');
           AudioBridge.write(base64Chunk);
         } catch (e) {}
       });
@@ -595,13 +652,17 @@ export default function App() {
             
             Notifications.scheduleNotificationAsync({
               content: {
-                title: "Incoming Call",
-                body: `Call from ${num}`,
+                title: `Incoming Call — ${num}`,
+                body: 'Tap to receive call',
                 sound: 'ringtone.wav',
                 priority: Notifications.AndroidNotificationPriority.MAX,
+                sticky: true,
+                ...(Platform.OS === 'android' ? { channelId: 'incoming-calls' } : {}),
               },
               trigger: null,
             });
+            // Play ringtone in foreground via expo-av (reliable across foreground/background)
+            playRingtoneSound();
             try { InCallManager.startRingtone('_BUNDLE_'); } catch(e) {}
           } else if (payload.type === 'CALL_CANCEL' || payload.type === 'CALL_ENDED') {
             const reason = payload.reason || payload.type;
@@ -609,6 +670,7 @@ export default function App() {
             setCallerNumber('');
             AudioBridge.stop();
             Notifications.dismissAllNotificationsAsync();
+            stopRingtoneSound();
             try { InCallManager.stopRingtone(); InCallManager.stop(); } catch(e) {}
             appendLog({
               type: 'call',
@@ -643,6 +705,7 @@ export default function App() {
     setCallStatus('IDLE');
     setCallerNumber('');
     Notifications.dismissAllNotificationsAsync();
+    stopRingtoneSound();
     try { InCallManager.stopRingtone(); InCallManager.stop(); } catch(e) {}
     
     if (socketRef.current) {
@@ -660,6 +723,7 @@ export default function App() {
     });
     setCallStatus('ACTIVE');
     Notifications.dismissAllNotificationsAsync();
+    stopRingtoneSound();
 
     try {
       InCallManager.stopRingtone();
@@ -676,10 +740,12 @@ export default function App() {
     }
     
     // Start microphone streaming to Host IP
+    // LiveAudioStream provides data as a Base64 string. The Host expects a Base64 string
+    // over UDP, so we send the string as UTF-8 bytes (NOT decoded PCM bytes).
     AudioBridge.start((data) => {
       if (audioSocketRef.current && !isMutedRef.current) {
-        const buffer = Buffer.from(data, 'base64');
-        audioSocketRef.current.send(buffer, 0, buffer.length, 8081, hostIPRef.current, (err) => {});
+        const b64Buf = Buffer.from(data, 'utf8');
+        audioSocketRef.current.send(b64Buf, 0, b64Buf.length, 8081, hostIPRef.current, (err) => {});
       }
     });
   }
