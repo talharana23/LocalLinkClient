@@ -587,10 +587,7 @@ export default function App() {
 
   useEffect(() => {
     startKeepAlive();
-    return () => {
-      if (keepAliveSoundRef.current) keepAliveSoundRef.current.unloadAsync();
-    };
-  }, []);
+    
     AsyncStorage.getItem('hostIP').then(ip => {
       if (ip) {
         setHostIP(ip);
@@ -623,6 +620,7 @@ export default function App() {
 
     return () => {
       notifResponseSub.remove();
+      if (keepAliveSoundRef.current) keepAliveSoundRef.current.unloadAsync();
     };
   }, []);
 
