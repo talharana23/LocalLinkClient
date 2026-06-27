@@ -731,7 +731,7 @@ export default function App() {
       });
 
       // 8080 Command Receiver
-      socket.on('message', (msg, rinfo) => {
+      socket.on('message', async (msg, rinfo) => {
         try {
           const payload = JSON.parse(msg.toString());
           const time = nowTime();
